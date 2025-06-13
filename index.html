@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>Global COVID-19 Playback (D3)</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://unpkg.com/topojson-client@3"></script>
+
+<style>
+ body{margin:0;font:12px/1.4 sans-serif;background:#111;color:#ddd}
+ #vis{display:flex;height:100vh}
+ svg#map{flex:1;background:#000;cursor:pointer}
+ #side{width:360px;padding:12px 18px;background:#181818;overflow:auto}
+ .country{stroke:#444;stroke-width:.35}
+ #slider{width:100%;margin-top:6px}
+ #prog{position:fixed;top:0;left:0;height:4px;width:0%;background:#4caf50}
+ #legend rect{shape-rendering:crispEdges}
+ input[type=radio]{margin-right:4px}
+ h2,h3{margin:4px 0 2px 0}
+</style>
+
+<div id="prog"></div>
+
+<div id="vis">
+  <svg id="map"></svg>
+
+  <div id="side">
+    <div style="display:flex;align-items:center">
+      <span id="play" style="cursor:pointer">▶</span>
+      <input id="slider" type="range">
+    </div>
+
+    <div id="metric">
+      <label><input type="radio" name="m" value="total" checked>Total cases</label>
+      <label style="margin-left:14px"><input type="radio" name="m" value="daily">New cases</label>
+    </div>
+
+    <h3 id="dateLbl"></h3>
+    <h2 id="countryLbl">–</h2>
+    <p id="nums"></p>
+
+    <svg id="chart" width="320" height="180"></svg>
+    <svg id="legend" width="260" height="38"></svg>
+  </div>
+</div>
+
+<script>
+/* ---------- paths ---------- */
+const DATA = "covid_confirmed.csv";     // your local file
+const WORLD= "https://cdn.jsdelivr.net/npm/world-atlas@2/countries-110m.json";
+
+/* ---------- helpers ---------- */
+const parse = d3.timeParse("%m/%d/%y"), fmt = d3.timeFormat("%d %b %Y");
+const color = d3.scaleSequentialSqrt(d3.interpolateTurbo);
+const match = new Map([         // Topo name  -> JHU name
+  ["United States of America","US"],
+  ["Russian Federation","Russia"],
+  ["Iran","Iran"],
+  ["Venezuela","Venezuela"],
+  ["Dem. Rep. Congo","Congo (Kinshasa)"],
+  ["Congo","Congo (Brazzaville)"],
+  ["Tanzania","Tanzania"],
+  ["Lao PDR","Laos"],
+  ["South Korea","Korea, South"],
+  ["North Korea","Korea, North"],
+  ["Vietnam","Vietnam"],
+  ["Ivory Coast","Cote d'Ivoire"],
+  ["Syria","Syria"],
+  ["Cape Verde","Cabo Verde"],
+  ["Bosnia and Herz.","Bosnia and Herzegovina"]
+]); /* extend if you notice mismatches */
+
+/* ---------- layout ---------- */
+const W = window.innerWidth-360, H = window.innerHeight;
+const mapSvg = d3.select("#map").attr("width",W).attr("height",H);
+const gMap   = mapSvg.append("g");
+const proj   = d3.geoNaturalEarth1().translate([W/2,H/2]).scale(W/6.3);
+const geo    = d3.geoPath(proj);
+
+const slider = d3.select("#slider");
+const playBt = d3.select("#play");
+const metric = d3.selectAll("input[name='m']");
+const dateLbl= d3.select("#dateLbl");
+const ctryLbl= d3.select("#countryLbl");
+const numsP  = d3.select("#nums");
+const chartSvg=d3.select("#chart");
+const legendSvg=d3.select("#legend");
+
+/* ---------- data containers ---------- */
+let dates=[], cum=new Map(), daily=new Map();
+let playing=false, timer=null;
+
+/* ---------- load ---------- */
+Promise.all([d3.json(WORLD), d3.csv(DATA,d3.autoType)]).then(([world,rows])=>{
+  /* extract date list */
+  dates = rows.columns.slice(4).map(parse);
+  const n = dates.length;
+  slider.attr("min",0).attr("max",n-1).attr("value",n-1);
+
+  /* aggregate country totals */
+  rows.forEach(r=>{
+    const key = r["Country/Region"];
+    if(!cum.has(key)){
+      cum.set(key, new Array(n).fill(0));
+      daily.set(key,new Array(n).fill(0));
+    }
+    for(let i=0;i<n;i++) cum.get(key)[i] += +r[rows.columns[4+i]];
+  });
+  /* compute daily */
+  cum.forEach((arr,key)=>{
+    const dArr=daily.get(key);
+    for(let i=1;i<n;i++) dArr[i]=arr[i]-arr[i-1];
+  });
+
+  /* draw map */
+  const countries = topojson.feature(world,world.objects.countries).features;
+  gMap.selectAll("path")
+      .data(countries)
+      .enter().append("path")
+      .attr("class","country")
+      .attr("d",geo)
+      .on("click",(ev,d)=>{
+        const jhu = match.get(d.properties.name)||d.properties.name;
+        ctryLbl.text(jhu); drawCurve(jhu,+slider.node().value);
+      });
+
+  /* legend skeleton */
+  legendSvg.append("rect").attr("x",0).attr("y",0).attr("width",200).attr("height",10);
+  const axisG = legendSvg.append("g").attr("transform","translate(0,10)");
+
+  function updateLegend(max){
+    color.domain([0,max]);
+    legendSvg.select("defs")?.remove();
+    const defs=legendSvg.append("defs");
+    const lg=defs.append("linearGradient").attr("id","lg");
+    lg.attr("x1","0%").attr("x2","100%").attr("y1","0%").attr("y2","0%");
+    d3.range(0,1.01,0.05).forEach(t=>{
+      lg.append("stop").attr("offset",t*100+"%").attr("stop-color",color(t*max));
+    });
+    legendSvg.select("rect").attr("fill","url(#lg)");
+    const scale=d3.scaleLinear([0,max],[0,200]);
+    axisG.call(d3.axisBottom(scale).ticks(4,d3.format(".2s")));
+  }
+
+  function redraw(idx){
+    const useDaily = metric.filter(":checked").node().value==="daily";
+    const src = useDaily ? daily : cum;
+    const m = d3.max([...src.values()],v=>v[idx]);
+    updateLegend(m);
+    dateLbl.text(fmt(dates[idx]));
+
+    gMap.selectAll("path.country")
+        .attr("fill",d=>{
+          const name = match.get(d.properties.name)||d.properties.name;
+          const arr  = src.get(name);
+          return arr ? color(arr[idx]) : "#333";
+        });
+
+    if(ctryLbl.text()!=="–") drawCurve(ctryLbl.text(),idx);
+  }
+
+  function drawCurve(name, idx){
+    const tot=cum.get(name), day=daily.get(name);
+    if(!tot){ numsP.text("No data"); return; }
+    numsP.html(`<b>${tot[idx].toLocaleString()}</b> total<br><b>${day[idx].toLocaleString()}</b> new`);
+    const w=320,h=140,m={l:38,r:8,t:10,b:22};
+    const x=d3.scaleUtc().domain(d3.extent(dates)).range([m.l,w-m.r]);
+    const y=d3.scaleLinear().domain([0,d3.max(tot)]).nice().range([h-m.b,m.t]);
+
+    chartSvg.selectAll("*").remove();
+    chartSvg.append("g").attr("transform",`translate(0,${h-m.b})`)
+             .call(d3.axisBottom(x).ticks(4));
+    chartSvg.append("g").attr("transform",`translate(${m.l},0)`)
+             .call(d3.axisLeft(y).ticks(4,d3.format(".2s")));
+    chartSvg.append("path").datum(tot.map((v,i)=>({d:dates[i],v})))
+             .attr("fill","none").attr("stroke","#4caf50").attr("stroke-width",2)
+             .attr("d",d3.line().x(d=>x(d.d)).y(d=>y(d.v)));
+    chartSvg.append("circle")
+             .attr("cx",x(dates[idx])).attr("cy",y(tot[idx]))
+             .attr("r",3).attr("fill","#ff9800");
+  }
+
+  /* UI listeners */
+  function stop(){ playing=false; playBt.text("▶"); timer?.stop(); }
+  function start(){
+    playing=true; playBt.text("❚❚");
+    timer=d3.interval(()=>{
+      let v=+slider.node().value;
+      if(v>=dates.length-1){ stop(); return; }
+      slider.node().value=++v; redraw(v);
+    },130);
+  }
+  slider.on("input",e=>{ stop(); redraw(+e.target.value); });
+  playBt.on("click",()=> playing?stop():start());
+  metric.on("change",()=> redraw(+slider.node().value));
+
+  /* first view */
+  redraw(n-1);
+});
+</script>
