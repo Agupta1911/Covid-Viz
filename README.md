@@ -27,4 +27,5 @@ An interactive dashboard built with **Streamlit** to visualize COVID-19 trends, 
    cd Covid-Viz
 
 ## County by Country Comparison:
-        <img width="2553" height="1007" alt="image" src="https://github.com/user-attachments/assets/00097905-24d0-4397-b4cc-c0643f017a3b" />
+ 
+<img width="2553" height="1007" alt="Screenshot 2025-08-10 170741" src="https://github.com/user-attachments/assets/d025c709-31f4-4669-b488-2d9c400716cd" />
